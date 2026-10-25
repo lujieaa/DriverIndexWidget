@@ -306,7 +306,8 @@ namespace DDriveIndexWallpaper
 
         // ---- wheel: plain scrolls the tree, Ctrl zooms the font ----
 
-        // The tree's own scrollbars are hidden (TVS_NOSCROLL), so plain
+        // The tree has no scroll-bar windows (WS_xSCROLL stripped in
+        // IndexTreeView) but its internal scroll range stays alive, so
         // wheel ticks are forwarded as WM_VSCROLL line/page commands.
         private void ScrollTree(int notches)
         {
@@ -317,6 +318,7 @@ namespace DDriveIndexWallpaper
                 catch { }
                 return;
             }
+            if (!_tree.IsHandleCreated || _tree.Nodes.Count == 0) return;
 
             int lines = 3;
             Win32.SystemParametersInfo(Win32.SpiGetWheelScrollLines, 0, ref lines, 0);

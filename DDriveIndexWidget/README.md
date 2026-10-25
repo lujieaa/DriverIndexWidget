@@ -74,7 +74,7 @@ DDriveIndexWidget/
 │  ├─ NodeItem.cs              树条目数据模型
 │  └─ FolderScanner.cs         目录枚举、噪音过滤、路径规整
 ├─ Controls/
-│  ├─ IndexTreeView.cs         自定义 TreeView（吞掉按下消息、屏蔽双击折叠、TVS_NOSCROLL 隐藏滚动条）
+│  ├─ IndexTreeView.cs         自定义 TreeView（吞掉按下消息、屏蔽双击折叠、去 WS_xSCROLL 样式并压制系统重显滚动条）
 │  ├─ GlyphButton.cs           透明色键底、白字黑描边的自绘文字按钮（悬停浅蓝）
 │  └─ MouseWheelHook.cs        WH_MOUSE_LL 钩子：悬停面板时普通滚轮滚动、Ctrl+滚轮缩放
 ├─ Dialogs/

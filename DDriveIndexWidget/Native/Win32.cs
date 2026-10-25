@@ -21,13 +21,23 @@ namespace DDriveIndexWallpaper
         public const int WmNcHitTest = 0x0084;
         public const int HtTransparent = -1;
 
-        // Scroll bars (programmatic scrolling while the tree's own bars
-        // are hidden with TVS_NOSCROLL)
+        // Window styles. WS_xSCROLL are stripped from the tree at create
+        // time so no scroll bar (or track gutter) ever exists; the tree's
+        // internal scroll range still works and honors WM_VSCROLL.
+        public const int WsHScroll = 0x00100000;
+        public const int WsVScroll = 0x00200000;
+
+        // Scroll commands (programmatic wheel scrolling; TVS_NOSCROLL is
+        // NOT used because it disables WM_VSCROLL and TVM_ENSUREVISIBLE).
         public const int WmVScroll = 0x0115;
         public const int SbLineUp = 0;
         public const int SbLineDown = 1;
         public const int SbPageUp = 2;
         public const int SbPageDown = 3;
+        public const int SbBoth = 3;
+
+        [DllImport("user32.dll")]
+        public static extern bool ShowScrollBar(IntPtr hWnd, int wBar, bool bShow);
 
         // TreeView messages / hit-test flags
         public const int TvmGetItemRect = 0x1100 + 4;
