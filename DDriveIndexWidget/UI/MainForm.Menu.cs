@@ -100,10 +100,18 @@ namespace DDriveIndexWallpaper
         // are they persisted and applied.
         private void ShowSettings()
         {
+            List<KeyValuePair<int, string>> pins =
+                new List<KeyValuePair<int, string>>(_settings.PinnedSlots);
+            pins.Sort(delegate(KeyValuePair<int, string> a,
+                               KeyValuePair<int, string> b)
+            {
+                return a.Key.CompareTo(b.Key);
+            });
+
             using (SettingsForm form = new SettingsForm(
                 _settings.GridCols, _settings.GridRows,
                 _settings.NameLines, _settings.NameChars, _settings.CellSpacing,
-                _settings.TreeVisible, _settings.RecentVisible))
+                _settings.TreeVisible, _settings.RecentVisible, pins))
             {
                 if (form.ShowDialog(this) != DialogResult.OK) return;
 
@@ -114,6 +122,8 @@ namespace DDriveIndexWallpaper
                 _settings.CellSpacing = Settings.ClampSpacing(form.CellSpacing);
                 _settings.TreeVisible = form.ShowTree;
                 _settings.RecentVisible = form.ShowRecent;
+                foreach (int slot in form.RemovedPins)
+                    _settings.PinnedSlots.Remove(slot);
                 _settings.Save();
 
                 ApplyPanelVisibility();

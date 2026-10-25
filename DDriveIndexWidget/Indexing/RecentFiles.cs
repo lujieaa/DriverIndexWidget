@@ -17,6 +17,8 @@ namespace DDriveIndexWallpaper
     {
         public string Path;
         public DateTime WhenUtc;
+        // True when the cell is owned by a user pin rather than MRU order.
+        public bool Pinned;
     }
 
     internal static class RecentFiles
@@ -48,8 +50,12 @@ namespace DDriveIndexWallpaper
         };
 
         // Up to max existing files behind the newest recent shortcuts,
-        // most recently used first and deduplicated by target path.
-        public static List<RecentFile> GetRecent(int max)
+        // most recently used first and deduplicated by target path. Paths
+        // in exclude (hidden-from-grid files, files pinned to other slots)
+        // are skipped but do not count against max, so the scan keeps
+        // walking back in time and the grid still fills every free slot.
+        public static List<RecentFile> GetRecent(int max,
+            HashSet<string> exclude)
         {
             List<RecentFile> result = new List<RecentFile>();
             if (max <= 0) return result;
@@ -98,6 +104,7 @@ namespace DDriveIndexWallpaper
                     string target = ResolveTarget(link, when, shell);
                     if (string.IsNullOrEmpty(target)) continue;
                     if (!Acceptable(target, seen, dir)) continue;
+                    if (exclude != null && exclude.Contains(target)) continue;
 
                     seen.Add(target);
                     result.Add(new RecentFile { Path = target, WhenUtc = when });

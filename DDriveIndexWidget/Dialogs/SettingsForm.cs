@@ -6,6 +6,8 @@
 // system DPI factor through R(); fonts are point-sized and scale by
 // themselves. Without this the dialog crammed together at 150%/200%.
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Drawing;
 using System.Windows.Forms;
 
@@ -22,6 +24,10 @@ namespace DDriveIndexWallpaper
         private readonly Label _info = new Label();
         private readonly CheckBox _showTree = new CheckBox();
         private readonly CheckBox _showRecent = new CheckBox();
+        private readonly Panel _pinHost = new Panel();
+        private readonly ToolTip _pinTips = new ToolTip();
+        private readonly List<KeyValuePair<int, string>> _pinsLive;
+        private readonly HashSet<int> _removedPins = new HashSet<int>();
 
         public int GridColumns { get { return (int)_cols.Value; } }
         public int GridRows { get { return (int)_rows.Value; } }
@@ -31,18 +37,27 @@ namespace DDriveIndexWallpaper
         public bool ShowTree { get { return _showTree.Checked; } }
         public bool ShowRecent { get { return _showRecent.Checked; } }
 
+        // Slot indexes whose pin was removed in this dialog session;
+        // applied by the owner only when Save is pressed.
+        public IEnumerable<int> RemovedPins { get { return _removedPins; } }
+
         // Scale a 96-DPI design coordinate to the current system DPI.
         private int R(int v) { return (int)Math.Round(v * _s); }
 
         public SettingsForm(int columns, int gridRows, int nameLines,
-            int nameChars, int spacing, bool treeVisible, bool recentVisible)
+            int nameChars, int spacing, bool treeVisible, bool recentVisible,
+            IList<KeyValuePair<int, string>> pinned)
         {
             using (Graphics gx = Graphics.FromHwnd(IntPtr.Zero))
                 _s = gx.DpiX / 96f;
 
+            _pinsLive = pinned != null
+                ? new List<KeyValuePair<int, string>>(pinned)
+                : new List<KeyValuePair<int, string>>();
+
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterScreen;
-            Size = new Size(R(360), R(404));
+            Size = new Size(R(360), R(508));
             BackColor = Color.FromArgb(38, 44, 52);
             ShowInTaskbar = false;
             TopMost = true;
@@ -156,11 +171,25 @@ namespace DDriveIndexWallpaper
             _showRecent.SetBounds(R(16), R(286), R(328), R(26));
             Controls.Add(_showRecent);
 
+            Label pinGroup = new Label();
+            pinGroup.Text = "Pinned grid slots (remove to release the slot):";
+            pinGroup.ForeColor = Color.White;
+            pinGroup.Font = new Font("Segoe UI", 9.5F, FontStyle.Bold);
+            pinGroup.SetBounds(R(16), R(318), R(328), R(22));
+            Controls.Add(pinGroup);
+
+            _pinHost.BackColor = Color.FromArgb(29, 34, 41);
+            _pinHost.BorderStyle = BorderStyle.FixedSingle;
+            _pinHost.AutoScroll = true;
+            _pinHost.SetBounds(R(16), R(342), R(328), R(96));
+            Controls.Add(_pinHost);
+            RebuildPins();
+
             Button save = new Button();
             save.Text = "Save";
             ConfigureButton(save);
             save.BackColor = Color.FromArgb(47, 115, 200);
-            save.SetBounds(R(16), R(350), R(150), R(38));
+            save.SetBounds(R(16), R(452), R(150), R(38));
             save.Click += delegate { DialogResult = DialogResult.OK; Close(); };
             Controls.Add(save);
 
@@ -168,12 +197,71 @@ namespace DDriveIndexWallpaper
             cancel.Text = "Cancel";
             ConfigureButton(cancel);
             cancel.BackColor = Color.FromArgb(58, 66, 76);
-            cancel.SetBounds(R(194), R(350), R(150), R(38));
+            cancel.SetBounds(R(194), R(452), R(150), R(38));
             cancel.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
             Controls.Add(cancel);
 
             AcceptButton = save;
             CancelButton = cancel;
+        }
+
+        // One row per pinned slot: "Slot N: file name" (full path in the
+        // tooltip) plus a Remove button that stages the slot for release
+        // on Save. Rows are authored at 96 DPI and scaled like the rest.
+        private void RebuildPins()
+        {
+            _pinHost.Controls.Clear();
+
+            int y = R(4);
+            foreach (KeyValuePair<int, string> kv in _pinsLive)
+            {
+                Label l = new Label();
+                l.AutoSize = false;
+                l.Text = "Slot " + (kv.Key + 1) + ":  " +
+                         Path.GetFileName(kv.Value);
+                l.ForeColor = Color.White;
+                l.Font = new Font("Segoe UI", 9F);
+                l.TextAlign = ContentAlignment.MiddleLeft;
+                l.AutoEllipsis = true;
+                l.SetBounds(R(6), y, R(224), R(24));
+                _pinTips.SetToolTip(l, kv.Value);
+                _pinHost.Controls.Add(l);
+
+                Button b = new Button();
+                b.Text = "Remove";
+                ConfigureButton(b);
+                b.BackColor = Color.FromArgb(58, 66, 76);
+                b.SetBounds(R(236), y, R(66), R(24));
+                int slot = kv.Key;
+                b.Click += delegate
+                {
+                    _removedPins.Add(slot);
+                    for (int i = 0; i < _pinsLive.Count; i++)
+                    {
+                        if (_pinsLive[i].Key == slot)
+                        {
+                            _pinsLive.RemoveAt(i);
+                            break;
+                        }
+                    }
+                    RebuildPins();
+                };
+                _pinHost.Controls.Add(b);
+
+                y += R(28);
+            }
+
+            if (_pinsLive.Count == 0)
+            {
+                Label empty = new Label();
+                empty.AutoSize = false;
+                empty.Text = "No pinned slots. Right-click a grid cell to pin a file.";
+                empty.ForeColor = Color.FromArgb(150, 165, 180);
+                empty.Font = new Font("Segoe UI", 9F);
+                empty.TextAlign = ContentAlignment.MiddleLeft;
+                empty.SetBounds(R(8), R(6), R(300), R(22));
+                _pinHost.Controls.Add(empty);
+            }
         }
 
         private Label MakeLabel(string text)

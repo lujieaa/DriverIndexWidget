@@ -11,6 +11,8 @@
 //   V|0/1      recent-files panel visible
 //   N|l|c      file name lines | characters per line in grid cells
 //   S|n        grid cell inner spacing in pixels
+//   X|path     recent file hidden from the grid ("Don't show this file")
+//   P|i|path   file pinned to linear grid slot i (0-based, row-major)
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -43,6 +45,13 @@ namespace DDriveIndexWallpaper
         public int NameLines = DefaultNameLines;
         public int NameChars = DefaultNameChars;
         public int CellSpacing = DefaultCellSpacing;
+
+        // Recent files the user removed from the grid; pinned files own a
+        // linear grid slot (row-major index) and never take MRU fills.
+        public HashSet<string> HiddenRecent =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<int, string> PinnedSlots =
+            new Dictionary<int, string>();
 
         private static string Dir
         {
@@ -148,6 +157,27 @@ namespace DDriveIndexWallpaper
                         if (int.TryParse(val, out sp))
                             s.CellSpacing = ClampSpacing(sp);
                     }
+                    else if (line.StartsWith("X|", StringComparison.Ordinal))
+                    {
+                        if (val.Length > 0) s.HiddenRecent.Add(val);
+                    }
+                    else if (line.StartsWith("P|", StringComparison.Ordinal))
+                    {
+                        // '|' is illegal in Windows file paths, so the
+                        // first separator splits slot index from the path.
+                        int bar = val.IndexOf('|');
+                        if (bar > 0)
+                        {
+                            int slot;
+                            string slotText = val.Substring(0, bar);
+                            string pinPath = val.Substring(bar + 1);
+                            if (int.TryParse(slotText, out slot) &&
+                                slot >= 0 && pinPath.Length > 0)
+                            {
+                                s.PinnedSlots[slot] = pinPath;
+                            }
+                        }
+                    }
                 }
             }
             catch { }
@@ -179,6 +209,11 @@ namespace DDriveIndexWallpaper
                 lines.Add("V|" + (RecentVisible ? "1" : "0"));
                 lines.Add("N|" + NameLines + "|" + NameChars);
                 lines.Add("S|" + CellSpacing);
+                foreach (string p in HiddenRecent) lines.Add("X|" + p);
+                List<int> pinSlots = new List<int>(PinnedSlots.Keys);
+                pinSlots.Sort();
+                foreach (int slot in pinSlots)
+                    lines.Add("P|" + slot + "|" + PinnedSlots[slot]);
                 File.WriteAllLines(FilePath, lines.ToArray());
             }
             catch { }

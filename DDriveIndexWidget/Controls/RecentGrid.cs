@@ -134,18 +134,27 @@ namespace DDriveIndexWallpaper
             _lineCache.Clear();
         }
 
+        // The list index IS the linear slot index; null entries are empty
+        // slots (a missing pin target with the MRU pool exhausted) and
+        // stay blank instead of shifting the following cells left.
         public void SetFiles(List<RecentFile> files)
         {
             _files = files ?? new List<RecentFile>();
             int sig = _files.Count;
             for (int i = 0; i < _files.Count; i++)
             {
+                if (_files[i] == null)
+                {
+                    sig = sig * 31;
+                    continue;
+                }
                 string n = Path.GetFileName(_files[i].Path) ?? "";
                 int wide = 0;
                 for (int k = 0; k < n.Length; k++)
                     if (IsWideGlyph(n[k])) wide++;
                 sig = sig * 31 + n.Length;
                 sig = sig * 31 + wide;
+                sig = sig * 31 + (_files[i].Pinned ? 1 : 0);
             }
             _filesSig = sig;
             InvalidateLayout();
@@ -176,8 +185,15 @@ namespace DDriveIndexWallpaper
 
         public string PathAt(Point p)
         {
+            RecentFile f = FileAt(p);
+            return f != null ? f.Path : null;
+        }
+
+        // Null for empty areas and empty slots.
+        public RecentFile FileAt(Point p)
+        {
             int i = IndexAt(p);
-            return i >= 0 ? _files[i].Path : null;
+            return (i >= 0 && i < _files.Count) ? _files[i] : null;
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -211,6 +227,9 @@ namespace DDriveIndexWallpaper
 
             for (int i = 0; i < _files.Count && i < _cols * _rows; i++)
             {
+                RecentFile rf = _files[i];
+                if (rf == null) continue; // empty slot keeps its position
+
                 int col = i % _cols;
                 int row = i / _cols;
                 Rectangle cell = new Rectangle(col * cw, row * ch, cw, ch);
@@ -220,7 +239,7 @@ namespace DDriveIndexWallpaper
                 if (content.Width < 8) content.Width = 8;
                 if (content.Height < 8) content.Height = 8;
 
-                if (_highlighted.Contains(_files[i].Path))
+                if (_highlighted.Contains(rf.Path))
                     g.FillRectangle(WidgetColors.HighlightBrush, content);
 
                 int textX = content.X + iconH + sp;
@@ -230,7 +249,7 @@ namespace DDriveIndexWallpaper
                 if (maxLines < 1) maxLines = 1;
 
                 List<string> lines = LinesFor(g, label,
-                    Path.GetFileName(_files[i].Path), textW, maxLines, lineFlags);
+                    Path.GetFileName(rf.Path), textW, maxLines, lineFlags);
 
                 // Icon block is NameLines line-heights; text may use more
                 // (re-wrapped) or fewer (short name) lines, centred.
@@ -240,7 +259,7 @@ namespace DDriveIndexWallpaper
 
                 Rectangle iconRect = new Rectangle(
                     content.X, top + (blockH - iconH) / 2, iconH, iconH);
-                DrawShellIcon(g, _files[i].Path, iconRect);
+                DrawShellIcon(g, rf.Path, iconRect);
 
                 int textTop = top + (blockH - textH) / 2;
                 for (int k = 0; k < lines.Count; k++)
@@ -253,6 +272,23 @@ namespace DDriveIndexWallpaper
                         Color.FromArgb(190, 0, 0, 0), Color.Transparent, lineFlags);
                     TextRenderer.DrawText(g, lines[k], label, slot,
                         Color.White, Color.Transparent, lineFlags);
+                }
+
+                // Small white dot marks a user-pinned slot.
+                if (rf.Pinned)
+                {
+                    try
+                    {
+                        int d = Math.Max(4, content.Width / 18);
+                        Rectangle dot = new Rectangle(
+                            content.Right - d - 1, content.Y + 1, d, d);
+                        using (SolidBrush pin = new SolidBrush(
+                            Color.FromArgb(235, 255, 255, 255)))
+                        {
+                            g.FillEllipse(pin, dot);
+                        }
+                    }
+                    catch { }
                 }
             }
         }
@@ -513,12 +549,13 @@ namespace DDriveIndexWallpaper
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            RecentFile f = FileAt(e.Location);
+            Cursor = f != null ? Cursors.Hand : Cursors.Default;
             int i = IndexAt(e.Location);
-            Cursor = i >= 0 ? Cursors.Hand : Cursors.Default;
             if (i != _tipIndex)
             {
                 _tipIndex = i;
-                _tips.SetToolTip(this, i >= 0 ? _files[i].Path : "");
+                _tips.SetToolTip(this, f != null ? f.Path : "");
             }
         }
 

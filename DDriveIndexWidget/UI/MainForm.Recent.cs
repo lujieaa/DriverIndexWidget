@@ -19,6 +19,8 @@ namespace DDriveIndexWallpaper
         private readonly Timer _recentUnhighlight = new Timer();
         private HashSet<string> _recentPaths; // null until the first load
         private string _menuRecentPath;
+        private int _menuRecentIndex = -1;
+        private bool _menuRecentPinned;
 
         private bool _gridPressActive;
         private Point _gridPressPoint;
@@ -151,7 +153,12 @@ namespace DDriveIndexWallpaper
         private void GridMouseDown(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Right)
-                _menuRecentPath = _grid.PathAt(e.Location);
+            {
+                RecentFile f = _grid.FileAt(e.Location);
+                _menuRecentIndex = _grid.IndexAt(e.Location);
+                _menuRecentPath = f != null ? f.Path : null;
+                _menuRecentPinned = f != null && f.Pinned;
+            }
         }
 
         private void GridMouseMove(object sender, MouseEventArgs e)
@@ -217,14 +224,79 @@ namespace DDriveIndexWallpaper
             });
         }
 
-        // Resolve shortcuts on a background thread; apply on the UI thread
-        // and highlight targets that did not appear in the previous list.
+        // Resolve shortcuts on a background thread; pinned slots keep
+        // their user-chosen files, every other slot fills MRU-first with
+        // hidden files and pinned files excluded. Apply on the UI thread
+        // and highlight MRU targets new since the previous list.
         private void RefreshRecent()
         {
-            int need = _settings.GridCols * _settings.GridRows;
+            int capacity = _settings.GridCols * _settings.GridRows;
+
+            // Snapshot user choices on the UI thread; the scan below runs
+            // on a thread pool thread and must not touch _settings.
+            Dictionary<int, string> pins =
+                new Dictionary<int, string>(_settings.PinnedSlots);
+            HashSet<string> hidden = new HashSet<string>(
+                _settings.HiddenRecent, StringComparer.OrdinalIgnoreCase);
+
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
-                List<RecentFile> files = RecentFiles.GetRecent(need);
+                RecentFile[] slots = new RecentFile[capacity];
+                HashSet<string> pinnedPaths =
+                    new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                int pinnedCount = 0;
+
+                foreach (KeyValuePair<int, string> kv in pins)
+                {
+                    int slot = kv.Key;
+                    string path = kv.Value;
+                    if (slot < 0 || slot >= capacity ||
+                        string.IsNullOrEmpty(path))
+                    {
+                        continue;
+                    }
+                    bool exists = false;
+                    DateTime when = DateTime.MinValue;
+                    try
+                    {
+                        exists = File.Exists(path);
+                        if (exists) when = File.GetLastWriteTimeUtc(path);
+                    }
+                    catch { exists = false; }
+                    if (!exists) continue; // missing pin: slot takes MRU fill
+
+                    slots[slot] = new RecentFile
+                    {
+                        Path = path,
+                        WhenUtc = when,
+                        Pinned = true
+                    };
+                    pinnedPaths.Add(path);
+                    pinnedCount++;
+                }
+
+                // Hidden files never fill a slot; pinned files never
+                // double-appear in an MRU slot.
+                HashSet<string> exclude =
+                    new HashSet<string>(hidden, StringComparer.OrdinalIgnoreCase);
+                foreach (string p in pinnedPaths) exclude.Add(p);
+
+                int need = capacity - pinnedCount;
+                List<RecentFile> pool = need > 0
+                    ? RecentFiles.GetRecent(need, exclude)
+                    : new List<RecentFile>();
+
+                // MRU pool fills free slots in row-major order; a null
+                // tail (pool exhausted) stays as an explicit empty slot.
+                int pi = 0;
+                for (int i = 0; i < capacity; i++)
+                {
+                    if (slots[i] == null && pi < pool.Count)
+                        slots[i] = pool[pi++];
+                }
+                List<RecentFile> files = new List<RecentFile>(capacity);
+                for (int i = 0; i < capacity; i++) files.Add(slots[i]);
+
                 UiInvoke(delegate
                 {
                     if (IsDisposed) return;
@@ -232,7 +304,8 @@ namespace DDriveIndexWallpaper
 
                     HashSet<string> nowPaths =
                         new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (RecentFile f in files) nowPaths.Add(f.Path);
+                    foreach (RecentFile f in files)
+                        if (f != null && !f.Pinned) nowPaths.Add(f.Path);
 
                     HashSet<string> hit =
                         new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -292,6 +365,8 @@ namespace DDriveIndexWallpaper
             if (!string.IsNullOrEmpty(_menuRecentPath))
             {
                 string file = _menuRecentPath;
+                int slot = _menuRecentIndex;
+
                 ToolStripMenuItem open = new ToolStripMenuItem("Open");
                 open.Click += delegate { OpenItem(file); };
                 _recentMenu.Items.Add(open);
@@ -303,6 +378,32 @@ namespace DDriveIndexWallpaper
                     catch { }
                 };
                 _recentMenu.Items.Add(parent);
+                _recentMenu.Items.Add(new ToolStripSeparator());
+
+                if (_menuRecentPinned)
+                {
+                    ToolStripMenuItem replace =
+                        new ToolStripMenuItem("Replace pinned file...");
+                    replace.Click += delegate { PickAndPin(slot); };
+                    _recentMenu.Items.Add(replace);
+
+                    ToolStripMenuItem unpin =
+                        new ToolStripMenuItem("Unpin this slot");
+                    unpin.Click += delegate { UnpinSlot(slot); };
+                    _recentMenu.Items.Add(unpin);
+                }
+                else
+                {
+                    ToolStripMenuItem pin =
+                        new ToolStripMenuItem("Pin a file to this slot...");
+                    pin.Click += delegate { PickAndPin(slot); };
+                    _recentMenu.Items.Add(pin);
+
+                    ToolStripMenuItem dontShow =
+                        new ToolStripMenuItem("Don't show this file");
+                    dontShow.Click += delegate { HideRecentFile(file); };
+                    _recentMenu.Items.Add(dontShow);
+                }
                 _recentMenu.Items.Add(new ToolStripSeparator());
             }
 
@@ -327,6 +428,59 @@ namespace DDriveIndexWallpaper
             ToolStripMenuItem exit = new ToolStripMenuItem("Exit");
             exit.Click += delegate { Application.Exit(); };
             _recentMenu.Items.Add(exit);
+        }
+
+        // ---- grid slot actions ----
+
+        // Remove one file from the MRU fill order: it joins the persisted
+        // hidden set, the list reflows and the newest not-yet-shown file
+        // lands in the freed tail slot.
+        private void HideRecentFile(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            _settings.HiddenRecent.Add(path);
+            _settings.Save();
+            RefreshRecent();
+        }
+
+        // Release a pinned slot back to MRU ordering.
+        private void UnpinSlot(int slot)
+        {
+            if (slot < 0) return;
+            _settings.PinnedSlots.Remove(slot);
+            _settings.Save();
+            RefreshRecent();
+        }
+
+        // File picker: the chosen file owns the slot permanently. The
+        // slot never takes an MRU file until the pin is removed here or
+        // via the pinned-slot list in Settings.
+        private void PickAndPin(int slot)
+        {
+            if (slot < 0) return;
+            using (OpenFileDialog dlg = new OpenFileDialog())
+            {
+                dlg.Title = "Choose a file to pin to this grid slot";
+                dlg.Filter = "All files (*.*)|*.*";
+                dlg.CheckFileExists = true;
+                if (_menuRecentIndex == slot && !string.IsNullOrEmpty(_menuRecentPath))
+                {
+                    try
+                    {
+                        string dir = Path.GetDirectoryName(_menuRecentPath);
+                        if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                            dlg.InitialDirectory = dir;
+                    }
+                    catch { }
+                }
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+
+                _settings.PinnedSlots[slot] = dlg.FileName;
+                // A deliberate pin overrides a previous "don't show".
+                _settings.HiddenRecent.Remove(dlg.FileName);
+                _settings.Save();
+                RefreshRecent();
+            }
         }
     }
 }
