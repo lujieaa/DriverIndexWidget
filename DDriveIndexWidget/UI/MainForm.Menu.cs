@@ -47,11 +47,22 @@ namespace DDriveIndexWallpaper
                 add.Click += delegate { ShowAddDialog(); };
                 _menu.Items.Add(add);
                 ToolStripMenuItem rescan = new ToolStripMenuItem("Rescan now");
-                rescan.Click += delegate { DebounceTick(null, EventArgs.Empty); };
+                rescan.Click += delegate { RequestRescan(); };
                 _menu.Items.Add(rescan);
                 ToolStripMenuItem collapse = new ToolStripMenuItem("Collapse tree");
                 collapse.Click += delegate { _tree.CollapseAll(); };
                 _menu.Items.Add(collapse);
+                ToolStripMenuItem settings = new ToolStripMenuItem("Settings...");
+                settings.Click += delegate { ShowSettings(); };
+                _menu.Items.Add(settings);
+                ToolStripMenuItem hide = new ToolStripMenuItem("Hide this panel");
+                hide.Click += delegate
+                {
+                    _settings.TreeVisible = false;
+                    _settings.Save();
+                    ApplyPanelVisibility();
+                };
+                _menu.Items.Add(hide);
                 _menu.Items.Add(new ToolStripSeparator());
                 ToolStripMenuItem exit = new ToolStripMenuItem("Exit");
                 exit.Click += delegate { Application.Exit(); };
@@ -84,15 +95,50 @@ namespace DDriveIndexWallpaper
             }
         }
 
+        // The one shared settings dialog, reachable from both panels and
+        // the tray icon. The dialog returns the chosen values; only on OK
+        // are they persisted and applied.
+        private void ShowSettings()
+        {
+            using (SettingsForm form = new SettingsForm(
+                _settings.GridCols, _settings.GridRows,
+                _settings.NameLines, _settings.NameChars, _settings.CellSpacing,
+                _settings.TreeVisible, _settings.RecentVisible))
+            {
+                if (form.ShowDialog(this) != DialogResult.OK) return;
+
+                _settings.GridCols = Settings.ClampGrid(form.GridColumns, true);
+                _settings.GridRows = Settings.ClampGrid(form.GridRows, false);
+                _settings.NameLines = Settings.ClampName(form.NameLines, true);
+                _settings.NameChars = Settings.ClampName(form.NameChars, false);
+                _settings.CellSpacing = Settings.ClampSpacing(form.CellSpacing);
+                _settings.TreeVisible = form.ShowTree;
+                _settings.RecentVisible = form.ShowRecent;
+                _settings.Save();
+
+                ApplyPanelVisibility();
+                ApplyGridShape();
+                RefreshRecent();
+            }
+        }
+
         private void ShowFolder(string path)
         {
             string norm = FolderScanner.Normalize(path);
             _settings.Hidden.Remove(norm);
             // Direct level-2 folders need no pin; deeper folders get pinned.
-            if (!FolderScanner.IsLevelTwo(norm) && Directory.Exists(path))
-                _settings.Added.Add(norm);
+            bool pinned = !FolderScanner.IsLevelTwo(norm) && Directory.Exists(path);
+            if (pinned) _settings.Added.Add(norm);
             _settings.Save();
             RebuildRoot();
+
+            // A new pin starts with its folder's own timestamp; fill the
+            // recursive edit time in the background, then re-sort.
+            if (pinned)
+            {
+                FolderScanner.WarmSubtree(norm,
+                    delegate { UiInvoke(delegate { ScheduleRefresh(); }); });
+            }
         }
     }
 }

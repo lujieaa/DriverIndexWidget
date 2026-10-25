@@ -1,7 +1,9 @@
 // MainForm shell: borderless full-screen transparent host window that
-// contains the floating panel. Construction, window styles/behavior and
-// the control tree live here; geometry/tree/menu/watcher are split into
-// the other MainForm.*.cs partial files.
+// contains TWO floating panels - the D: index tree and the recent-files
+// grid - plus one shared tray icon and one shared settings dialog.
+// Construction, window styles/behavior and the control tree live here;
+// geometry/tree/menu/watcher/recent/tray logic is split into the other
+// MainForm.*.cs partial files.
 using System;
 using System.Drawing;
 using System.Windows.Forms;
@@ -15,6 +17,7 @@ namespace DDriveIndexWallpaper
 
         private readonly Settings _settings = Settings.Load();
 
+        // ---- tree panel chrome ----
         private readonly Panel _panel = new Panel();
         private readonly IndexTreeView _tree = new IndexTreeView();
         private readonly GlyphButton _btnAdd = new GlyphButton("Add");
@@ -22,11 +25,21 @@ namespace DDriveIndexWallpaper
         private readonly Button _grip = new Button();
         // 7 hot zones: 4 edges + 3 corners (bottom-right is the grip button).
         private readonly Panel[] _zones = new Panel[7];
+
+        // ---- recent-files panel chrome ----
+        private readonly Panel _panelRecent = new Panel();
+        private readonly RecentGrid _grid = new RecentGrid();
+        private readonly Button _gripRecent = new Button();
+        private readonly Panel[] _rzones = new Panel[7];
+
         private DragMode _hoverZone = DragMode.None;
         private readonly Timer _hoverTimer = new Timer();
         private readonly ContextMenuStrip _menu = new ContextMenuStrip();
+        private readonly ContextMenuStrip _recentMenu = new ContextMenuStrip();
+        private readonly NotifyIcon _tray = new NotifyIcon();
+        private readonly ContextMenuStrip _trayMenu = new ContextMenuStrip();
 
-        // The FileSystemWatcher field itself is declared in MainForm.Watcher.cs.
+        // The tree FileSystemWatcher field itself is declared in MainForm.Watcher.cs.
         private readonly Timer _debounce = new Timer();
         private readonly Timer _bottomKeeper = new Timer();
         private readonly Timer _unhighlight = new Timer();
@@ -86,6 +99,25 @@ namespace DDriveIndexWallpaper
 
         private void BuildUi()
         {
+            BuildTreeUi();
+            BuildRecentUi();
+            BuildTray();
+
+            _menu.Opening += MenuOpening;
+            _recentMenu.Opening += RecentMenuOpening;
+            _trayMenu.Opening += TrayMenuOpening;
+
+            ApplyInitialRects();
+            ApplyPanelVisibility();
+
+            // Edge/corner reveal on proximity.
+            _hoverTimer.Interval = 50;
+            _hoverTimer.Tick += delegate { HoverTick(); };
+            _hoverTimer.Start();
+        }
+
+        private void BuildTreeUi()
+        {
             _panel.BackColor = WidgetColors.Key; // see-through everywhere
             Controls.Add(_panel);
 
@@ -125,7 +157,7 @@ namespace DDriveIndexWallpaper
 
             ToolTip tips = new ToolTip();
             tips.SetToolTip(_btnAdd, "Add a folder to the panel");
-            tips.SetToolTip(_btnMenu, "Menu (rescan / exit)");
+            tips.SetToolTip(_btnMenu, "Menu (rescan / settings / exit)");
 
             // Hidden-until-hover resize zones: 4 edges + 3 corners. They are
             // painted with the transparency key (inert, see-through) until
@@ -146,7 +178,7 @@ namespace DDriveIndexWallpaper
                 z.BackColor = WidgetColors.Key;
                 z.Cursor = zoneCursors[i];
                 z.Tag = zoneModes[i];
-                AttachDrag(z, zoneModes[i]);
+                AttachDrag(z, zoneModes[i], _panel);
                 _zones[i] = z;
                 _panel.Controls.Add(z);
             }
@@ -162,19 +194,10 @@ namespace DDriveIndexWallpaper
             _grip.BackColor = WidgetColors.ResizeGrip;
             _grip.UseVisualStyleBackColor = false;
             _grip.Cursor = Cursors.SizeNWSE;
-            AttachDrag(_grip, DragMode.BottomRight);
+            AttachDrag(_grip, DragMode.BottomRight, _panel);
             Controls.Add(_grip);
             _grip.BringToFront();
             tips.SetToolTip(_grip, "Drag to resize");
-
-            // Edge/corner reveal on proximity.
-            _hoverTimer.Interval = 50;
-            _hoverTimer.Tick += delegate { HoverTick(); };
-            _hoverTimer.Start();
-
-            _menu.Opening += MenuOpening;
-
-            ApplyInitialRect();
         }
 
         // ---- window behavior ----
@@ -184,14 +207,19 @@ namespace DDriveIndexWallpaper
             get { return true; }
         }
 
-        // Outside the panel rectangle the form is fully click-through.
+        // Outside every visible panel rectangle the form is click-through.
         protected override void WndProc(ref Message m)
         {
             base.WndProc(ref m);
             if (m.Msg == Win32.WmNcHitTest)
             {
-                Rectangle r = _panel.RectangleToScreen(_panel.ClientRectangle);
-                if (!r.Contains(Cursor.Position)) m.Result = (IntPtr)Win32.HtTransparent;
+                Point p = Cursor.Position;
+                bool onTree = _panel.Visible &&
+                              PanelScreenRect(_panel).Contains(p);
+                bool onRecent = _panelRecent.Visible &&
+                                PanelScreenRect(_panelRecent).Contains(p);
+                if (!onTree && !onRecent)
+                    m.Result = (IntPtr)Win32.HtTransparent;
             }
         }
 
@@ -208,15 +236,41 @@ namespace DDriveIndexWallpaper
             base.OnShown(e);
             KeepAtBottom();
             StartWatcher();
+            StartRecentWatcher();
             EnsureTreeBuilt();
+            RefreshRecent();
             _bottomKeeper.Start();
+            _recentPoll.Start();
 
-            // Wheel actions work on hover because the form never gets
-            // keyboard focus; a low-level mouse hook catches the wheel:
-            // plain wheel scrolls, Ctrl+wheel zooms the font.
-            _wheelHook = new MouseWheelHook(
-                delegate { return _panel.RectangleToScreen(_panel.ClientRectangle); },
-                ZoomTree, ScrollTree);
+            // Background recursive scan powers the edit-time ordering;
+            // re-sort the list once the real timestamps are known.
+            FolderScanner.WarmUp(
+                _settings.Added, _settings.Hidden,
+                delegate { UiInvoke(delegate { ScheduleRefresh(); }); });
+
+            _wheelHook = new MouseWheelHook(new WheelZone[]
+            {
+                new WheelZone
+                {
+                    Area = delegate
+                    {
+                        return _panel.Visible ? PanelScreenRect(_panel)
+                                              : Rectangle.Empty;
+                    },
+                    Zoom = ZoomTree,
+                    Scroll = ScrollTree
+                },
+                new WheelZone
+                {
+                    Area = delegate
+                    {
+                        return _panelRecent.Visible ? PanelScreenRect(_panelRecent)
+                                                    : Rectangle.Empty;
+                    },
+                    Zoom = ZoomRecent,
+                    Scroll = null
+                }
+            });
             _wheelHook.Start();
         }
 
@@ -224,6 +278,10 @@ namespace DDriveIndexWallpaper
         {
             if (_wheelHook != null) _wheelHook.Dispose();
             if (_folderFont != null) _folderFont.Dispose();
+            StopRecentWatcher();
+            try { _tray.Visible = false; _tray.Dispose(); }
+            catch { }
+            FileIcons.DisposeAll();
             base.OnFormClosed(e);
         }
 
@@ -232,17 +290,9 @@ namespace DDriveIndexWallpaper
             base.OnResize(e);
             if (_panel != null && IsHandleCreated)
             {
-                // Keep the panel inside the screen if the screen itself changed.
-                Rectangle b = Bounds;
-                Rectangle r = _panel.Bounds;
-                if (r.Right > b.Right - 40 || r.Bottom > b.Bottom - 20)
-                {
-                    r.Width = Math.Min(r.Width, MaxW());
-                    r.Height = Math.Min(r.Height, MaxH());
-                    r.X = Math.Min(r.X, b.Right - r.Width - 8);
-                    r.Y = Math.Min(r.Y, b.Bottom - r.Height - 8);
-                    _panel.Bounds = r;
-                }
+                // Keep both panels inside the screen if it changed.
+                ClampPanelInside(_panel);
+                ClampPanelInside(_panelRecent);
                 LayoutChildren();
             }
         }

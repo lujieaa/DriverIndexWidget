@@ -1,8 +1,9 @@
 // WH_MOUSE_LL hook used because the widget never takes keyboard focus
 // (WS_EX_NOACTIVATE), so ordinary wheel messages go to whatever window
-// the user last focused. While the pointer hovers the panel this hook:
-//   - plain wheel      -> scroll the tree (its own scrollbars are hidden)
-//   - Ctrl + wheel     -> zoom the tree font
+// the user last focused. While the pointer hovers one of the registered
+// panel areas this hook:
+//   - plain wheel      -> that area's scroll action (may be null)
+//   - Ctrl + wheel     -> that area's zoom action
 // In both cases the message is swallowed so the window behind does not
 // scroll/zoom too. The callback runs on the installing UI thread.
 using System;
@@ -11,21 +12,23 @@ using System.Runtime.InteropServices;
 
 namespace DDriveIndexWallpaper
 {
+    internal sealed class WheelZone
+    {
+        public Func<Rectangle> Area;   // screen rect that triggers the zone
+        public Action<int> Zoom;       // wheel notches, Ctrl held
+        public Action<int> Scroll;     // wheel notches, plain (may be null)
+    }
+
     internal sealed class MouseWheelHook : IDisposable
     {
-        private readonly Func<Rectangle> _hotArea;   // screen rect that triggers
-        private readonly Action<int> _onZoom;         // wheel notches, Ctrl held
-        private readonly Action<int> _onScroll;       // wheel notches, plain
+        private readonly WheelZone[] _zones;
         private readonly Win32.LowLevelMouseProc _proc;
         private IntPtr _handle;
         private bool _disposed;
 
-        public MouseWheelHook(Func<Rectangle> hotArea,
-            Action<int> onZoom, Action<int> onScroll)
+        public MouseWheelHook(WheelZone[] zones)
         {
-            _hotArea = hotArea;
-            _onZoom = onZoom;
-            _onScroll = onScroll;
+            _zones = zones ?? new WheelZone[0];
             _proc = HookCallback; // keep a reference so the delegate is not GC'd
         }
 
@@ -33,6 +36,8 @@ namespace DDriveIndexWallpaper
         {
             // dwThreadId = 0 / hMod = Zero is valid for low-level hooks.
             _handle = Win32.SetWindowsHookEx(Win32.WhMouseLL, _proc, IntPtr.Zero, 0);
+            if (_handle == IntPtr.Zero)
+                AppLog.Write("mouse hook failed to install");
         }
 
         private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
@@ -41,10 +46,18 @@ namespace DDriveIndexWallpaper
             {
                 Win32.PointStruct pt;
                 Win32.GetCursorPos(out pt);
-                Rectangle area;
-                try { area = _hotArea(); }
-                catch { area = Rectangle.Empty; }
-                if (area.Contains(new Point(pt.X, pt.Y)))
+                Point cursor = new Point(pt.X, pt.Y);
+
+                WheelZone hit = null;
+                for (int i = 0; i < _zones.Length; i++)
+                {
+                    Rectangle area;
+                    try { area = _zones[i].Area(); }
+                    catch { area = Rectangle.Empty; }
+                    if (area.Contains(cursor)) { hit = _zones[i]; break; }
+                }
+
+                if (hit != null)
                 {
                     Win32.MsllHookStruct data =
                         (Win32.MsllHookStruct)Marshal.PtrToStructure(
@@ -56,10 +69,10 @@ namespace DDriveIndexWallpaper
                         bool ctrl = (Win32.GetAsyncKeyState(Win32.VkControl) & 0x8000) != 0;
                         try
                         {
-                            if (ctrl) _onZoom(notches);
-                            else _onScroll(notches);
+                            if (ctrl) { if (hit.Zoom != null) hit.Zoom(notches); }
+                            else if (hit.Scroll != null) hit.Scroll(notches);
                         }
-                        catch { }
+                        catch (Exception ex) { AppLog.Write("wheel action ex: " + ex); }
                     }
                     return (IntPtr)1; // swallow: keep the panel "modal" to wheel
                 }

@@ -1,5 +1,7 @@
-// Geometry and drag/resize: default rectangle, min/max limits, child
-// layout, hover-revealed resize zones and the move/resize drag loop.
+// Geometry and drag/resize: default rectangles, min/max limits, child
+// layout for both floating panels, hover-revealed resize zones and the
+// move/resize drag loop. Every drag carries its owning Panel so one
+// shared implementation serves the tree panel and the recent panel.
 using System;
 using System.Drawing;
 using System.Windows.Forms;
@@ -20,20 +22,31 @@ namespace DDriveIndexWallpaper
         private const int Corner = 14;  // corner hot square size
         private const int GripSize = 14;
 
-        private void AttachDrag(Control c, DragMode mode)
+        // The panel currently targeted by an active drag / hover zone.
+        private Panel _dragPanel;
+        private Panel _hoverPanel;
+
+        private void AttachDrag(Control c, DragMode mode, Panel host)
         {
             c.MouseDown += delegate(object s, MouseEventArgs e)
             {
                 if (e.Button != MouseButtons.Left) return;
-                BeginDrag(mode, c.PointToScreen(e.Location));
+                BeginDrag(mode, c.PointToScreen(e.Location), host);
             };
-            c.MouseMove += DragMouseMove;
+            c.MouseMove += delegate(object s, MouseEventArgs e)
+            {
+                if (_drag == DragMode.None || e.Button != MouseButtons.Left) return;
+                Point now = ((Control)s).PointToScreen(e.Location);
+                ApplyDragDelta(now, _dragPanel);
+            };
             c.MouseUp += EndDrag;
         }
 
-        private void ApplyInitialRect()
+        private void ApplyInitialRects()
         {
             Rectangle work = Screen.PrimaryScreen.WorkingArea;
+
+            // Tree panel: saved rect or bottom-right default.
             int w;
             int h;
             Rectangle r;
@@ -55,6 +68,27 @@ namespace DDriveIndexWallpaper
                 r = new Rectangle(work.Right - w - 16, work.Bottom - h - 8, w, h);
             }
             _panel.Bounds = r;
+
+            // Recent panel: saved rect or bottom-left default sized for the
+            // default 3 columns x 2 rows grid.
+            if (_settings.RecentRect.HasValue)
+            {
+                Rectangle saved = _settings.RecentRect.Value;
+                int rw = Clamp(saved.Width, MinW, MaxW());
+                int rh = Clamp(saved.Height, MinH, MaxH());
+                int rx = Clamp(saved.X, Bounds.Left - rw + 80, Bounds.Right - 80);
+                int ry = Clamp(saved.Y, Bounds.Top, Bounds.Bottom - 44);
+                _panelRecent.Bounds = new Rectangle(rx, ry, rw, rh);
+            }
+            else
+            {
+                int rw = Bounds.Width / 4;
+                if (rw < MinW) rw = MinW;
+                int rh = Math.Max(MinH, work.Height / 5);
+                _panelRecent.Bounds =
+                    new Rectangle(16, work.Bottom - rh - 8, rw, rh);
+            }
+
             LayoutChildren();
         }
 
@@ -76,18 +110,24 @@ namespace DDriveIndexWallpaper
 
         private void LayoutChildren()
         {
+            LayoutTreeChrome();
+            if (_panelRecent != null) LayoutRecentChrome();
+        }
+
+        private void LayoutTreeChrome()
+        {
             int w = _panel.Width;
             int h = _panel.Height;
             _tree.SetBounds(0, 0, w, h);
 
             // Zones are addressed via their Tag: L,R,T,B,TL,TR,BL.
-            Zone(DragMode.Left).SetBounds(0, 0, Edge, h);
-            Zone(DragMode.Right).SetBounds(w - Edge, 0, Edge, h);
-            Zone(DragMode.Top).SetBounds(0, 0, w, Edge);
-            Zone(DragMode.Bottom).SetBounds(0, h - Edge, w, Edge);
-            Zone(DragMode.TopLeft).SetBounds(0, 0, Corner, Corner);
-            Zone(DragMode.TopRight).SetBounds(w - Corner, 0, Corner, Corner);
-            Zone(DragMode.BottomLeft).SetBounds(0, h - Corner, Corner, Corner);
+            TreeZone(DragMode.Left).SetBounds(0, 0, Edge, h);
+            TreeZone(DragMode.Right).SetBounds(w - Edge, 0, Edge, h);
+            TreeZone(DragMode.Top).SetBounds(0, 0, w, Edge);
+            TreeZone(DragMode.Bottom).SetBounds(0, h - Edge, w, Edge);
+            TreeZone(DragMode.TopLeft).SetBounds(0, 0, Corner, Corner);
+            TreeZone(DragMode.TopRight).SetBounds(w - Corner, 0, Corner, Corner);
+            TreeZone(DragMode.BottomLeft).SetBounds(0, h - Corner, Corner, Corner);
 
             // Form-level transparent glyph buttons / blue grip float above
             // the tree. Add and the menu glyph stack vertically at the
@@ -104,30 +144,86 @@ namespace DDriveIndexWallpaper
                             GripSize, GripSize);
         }
 
-        private Panel Zone(DragMode mode)
+        private void LayoutRecentChrome()
         {
-            for (int i = 0; i < _zones.Length; i++)
+            int w = _panelRecent.Width;
+            int h = _panelRecent.Height;
+            _grid.SetBounds(0, 0, w, h);
+
+            RecentZone(DragMode.Left).SetBounds(0, 0, Edge, h);
+            RecentZone(DragMode.Right).SetBounds(w - Edge, 0, Edge, h);
+            RecentZone(DragMode.Top).SetBounds(0, 0, w, Edge);
+            RecentZone(DragMode.Bottom).SetBounds(0, h - Edge, w, Edge);
+            RecentZone(DragMode.TopLeft).SetBounds(0, 0, Corner, Corner);
+            RecentZone(DragMode.TopRight).SetBounds(w - Corner, 0, Corner, Corner);
+            RecentZone(DragMode.BottomLeft).SetBounds(0, h - Corner, Corner, Corner);
+
+            _gripRecent.SetBounds(
+                _panelRecent.Right - 6 - GripSize,
+                _panelRecent.Bottom - 6 - GripSize,
+                GripSize, GripSize);
+        }
+
+        private Panel TreeZone(DragMode mode)
+        {
+            return ZoneIn(_zones, mode);
+        }
+
+        private Panel RecentZone(DragMode mode)
+        {
+            return ZoneIn(_rzones, mode);
+        }
+
+        private Panel ZoneIn(Panel[] zones, DragMode mode)
+        {
+            for (int i = 0; i < zones.Length; i++)
             {
-                if ((DragMode)_zones[i].Tag == mode) return _zones[i];
+                if ((DragMode)zones[i].Tag == mode) return zones[i];
             }
             return null;
         }
 
-        // Light up the resize zone the pointer is close to; zones are the
-        // transparency key (invisible, click-through) the rest of the time.
+        private Panel[] ZonesOf(Panel host)
+        {
+            return host == _panelRecent ? _rzones : _zones;
+        }
+
+        // Light up the resize zone the pointer is close to on either
+        // panel; zones stay the transparency key (invisible, click-through)
+        // the rest of the time.
         private void HoverTick()
         {
             if (_drag != DragMode.None) return;
             Point p = Cursor.Position;
-            Rectangle r = _panel.RectangleToScreen(_panel.ClientRectangle);
-            DragMode z = ZoneAt(p, r);
-            if (z == _hoverZone) return;
 
-            if (_hoverZone != DragMode.None && _hoverZone != DragMode.BottomRight)
-                SetZoneLit(Zone(_hoverZone), false);
-            _hoverZone = z;
-            if (z != DragMode.None && z != DragMode.BottomRight)
-                SetZoneLit(Zone(z), true);
+            Panel foundPanel = null;
+            DragMode foundZone = DragMode.None;
+            if (_panel.Visible)
+            {
+                DragMode z = ZoneAt(p, PanelScreenRect(_panel));
+                if (z != DragMode.None) { foundPanel = _panel; foundZone = z; }
+            }
+            if (foundPanel == null && _panelRecent.Visible)
+            {
+                DragMode z = ZoneAt(p, PanelScreenRect(_panelRecent));
+                if (z != DragMode.None) { foundPanel = _panelRecent; foundZone = z; }
+            }
+
+            if (foundPanel == _hoverPanel && foundZone == _hoverZone) return;
+
+            if (_hoverPanel != null && _hoverZone != DragMode.BottomRight)
+                SetZoneLit(ZoneIn(ZonesOf(_hoverPanel), _hoverZone), false);
+
+            _hoverPanel = foundPanel;
+            _hoverZone = foundZone;
+
+            if (foundPanel != null && foundZone != DragMode.BottomRight)
+                SetZoneLit(ZoneIn(ZonesOf(foundPanel), foundZone), true);
+        }
+
+        private static Rectangle PanelScreenRect(Panel host)
+        {
+            return host.RectangleToScreen(host.ClientRectangle);
         }
 
         private void SetZoneLit(Panel z, bool lit)
@@ -158,22 +254,17 @@ namespace DDriveIndexWallpaper
             return DragMode.None;
         }
 
-        private void BeginDrag(DragMode mode, Point screen)
+        private void BeginDrag(DragMode mode, Point screen, Panel host)
         {
             _drag = mode;
+            _dragPanel = host;
             _dragStart = screen;
-            _dragStartRect = _panel.Bounds;
+            _dragStartRect = host.Bounds;
         }
 
-        private void DragMouseMove(object sender, MouseEventArgs e)
+        private void ApplyDragDelta(Point now, Panel host)
         {
-            if (_drag == DragMode.None || e.Button != MouseButtons.Left) return;
-            Point now = ((Control)sender).PointToScreen(e.Location);
-            ApplyDragDelta(now);
-        }
-
-        private void ApplyDragDelta(Point now)
-        {
+            if (host == null) host = _panel;
             int dx = now.X - _dragStart.X;
             int dy = now.Y - _dragStart.Y;
             Rectangle s = _dragStartRect;
@@ -222,16 +313,38 @@ namespace DDriveIndexWallpaper
                     r.X = s.Right - r.Width;
                     break;
             }
-            _panel.Bounds = r;
+            host.Bounds = r;
             LayoutChildren();
         }
 
         private void EndDrag(object sender, MouseEventArgs e)
         {
             if (_drag == DragMode.None) return;
+            Panel host = _dragPanel;
             _drag = DragMode.None;
-            _settings.Rect = _panel.Bounds;
+            _dragPanel = null;
+            SavePanelRect(host);
+        }
+
+        private void SavePanelRect(Panel host)
+        {
+            if (host == null) return;
+            if (host == _panelRecent) _settings.RecentRect = host.Bounds;
+            else _settings.Rect = host.Bounds;
             _settings.Save();
+        }
+
+        // Pull a panel back inside the screen after a display change.
+        private void ClampPanelInside(Panel p)
+        {
+            Rectangle b = Bounds;
+            Rectangle r = p.Bounds;
+            if (r.Right <= b.Right - 40 && r.Bottom <= b.Bottom - 20) return;
+            r.Width = Clamp(r.Width, MinW, MaxW());
+            r.Height = Clamp(r.Height, MinH, MaxH());
+            r.X = Clamp(r.X, b.Left - r.Width + 80, b.Right - 80);
+            r.Y = Clamp(r.Y, b.Top, b.Bottom - 44);
+            p.Bounds = r;
         }
     }
 }

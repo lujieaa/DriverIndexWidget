@@ -40,8 +40,10 @@ namespace DDriveIndexWallpaper
         public static extern bool ShowScrollBar(IntPtr hWnd, int wBar, bool bShow);
 
         // TreeView messages / hit-test flags
+        public const int TvmGetNextItem = 0x1100 + 10;
         public const int TvmGetItemRect = 0x1100 + 4;
         public const int TvmHitTest = 0x1100 + 17;
+        public const int TvgnFirstVisible = 5;
         public const uint TvhtNowhere = 0x0001;
         public const uint TvhtOnItemIcon = 0x0002;
         public const uint TvhtOnItemLabel = 0x0004;
@@ -141,5 +143,31 @@ namespace DDriveIndexWallpaper
             public uint Time;
             public IntPtr DwExtraInfo;
         }
+
+        // ---- shell file icons (the real default-application icon) ----
+
+        public const uint ShgfiIcon = 0x00000100;
+        public const uint ShgfiLargeIcon = 0x00000000;
+        public const uint ShgfiUseFileAttributes = 0x00000010;
+        public const uint FileAttributeNormal = 0x00000080;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        public struct ShFileInfo
+        {
+            public IntPtr HIcon;
+            public int IIcon;
+            public uint DwAttributes;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+            public string SzDisplayName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)]
+            public string SzTypeName;
+        }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Auto)]
+        public static extern IntPtr SHGetFileInfo(string pszPath, uint dwFileAttributes,
+            ref ShFileInfo psfi, uint cbSizeFileInfo, uint uFlags);
+
+        [DllImport("user32.dll")]
+        public static extern bool DestroyIcon(IntPtr hIcon);
     }
 }

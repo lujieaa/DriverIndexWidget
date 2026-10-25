@@ -28,11 +28,20 @@ namespace DDriveIndexWallpaper
         {
             _watcher = new FileSystemWatcher(FolderScanner.DriveRoot);
             _watcher.IncludeSubdirectories = true;
-            _watcher.NotifyFilter = NotifyFilters.DirectoryName | NotifyFilters.FileName;
+            // LastWrite keeps the edit-time order fresh when an existing
+            // file's content is saved; name events cover add/remove/rename.
+            _watcher.NotifyFilter = NotifyFilters.DirectoryName |
+                                    NotifyFilters.FileName |
+                                    NotifyFilters.LastWrite;
             _watcher.InternalBufferSize = 65536;
-            _watcher.Created += delegate { ScheduleRefresh(); };
-            _watcher.Deleted += delegate { ScheduleRefresh(); };
-            _watcher.Renamed += delegate { ScheduleRefresh(); };
+            _watcher.Created += delegate(object s, FileSystemEventArgs e)
+            { OnDiskChange(e.FullPath, false); };
+            _watcher.Changed += delegate(object s, FileSystemEventArgs e)
+            { OnDiskChange(e.FullPath, false); };
+            _watcher.Deleted += delegate(object s, FileSystemEventArgs e)
+            { OnDiskChange(e.FullPath, true); };
+            _watcher.Renamed += delegate(object s, RenamedEventArgs e)
+            { OnDiskChange(e.OldFullPath, true); OnDiskChange(e.FullPath, false); };
             _watcher.Error += delegate(object s, ErrorEventArgs e)
             {
                 AppLog.Write("watcher error: " + e.GetException().Message);
@@ -63,6 +72,41 @@ namespace DDriveIndexWallpaper
                 _debounce.Stop();
                 _debounce.Start();
             });
+        }
+
+        // Watcher callbacks arrive on thread-pool threads. Bump the owning
+        // root entry's edit time immediately (cheap), then let the debounced
+        // rebuild re-sort the list. Gone entries (delete/rename-old) carry
+        // no usable timestamp, so the event moment itself is the edit time.
+        private void OnDiskChange(string path, bool gone)
+        {
+            try
+            {
+                DateTime when;
+                if (gone)
+                {
+                    when = DateTime.UtcNow;
+                }
+                else
+                {
+                    try { when = File.GetLastWriteTimeUtc(path); }
+                    catch { when = DateTime.UtcNow; }
+                    if (when == default(DateTime)) when = DateTime.UtcNow;
+                }
+                FolderScanner.BumpEditTime(path, when, _settings.Added);
+            }
+            catch { }
+            ScheduleRefresh();
+        }
+
+        // Manual "Rescan now": recompute the recursive edit times in the
+        // background and refresh structure immediately.
+        private void RequestRescan()
+        {
+            FolderScanner.WarmUp(
+                _settings.Added, _settings.Hidden,
+                delegate { UiInvoke(delegate { ScheduleRefresh(); }); });
+            DebounceTick(null, EventArgs.Empty);
         }
 
         private void DebounceTick(object sender, EventArgs e)

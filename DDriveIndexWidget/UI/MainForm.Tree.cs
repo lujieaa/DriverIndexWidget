@@ -25,8 +25,7 @@ namespace DDriveIndexWallpaper
             if (wasDrag)
             {
                 _drag = DragMode.None;
-                _settings.Rect = _panel.Bounds;
-                _settings.Save();
+                SavePanelRect(_panel);
             }
             _pressActive = false;
             if (wasDrag) return;
@@ -88,11 +87,11 @@ namespace DDriveIndexWallpaper
             if (_drag != DragMode.Move && (dx * dx + dy * dy) >= 36)
             {
                 // Movement threshold crossed: start moving the panel.
-                BeginDrag(DragMode.Move, _tree.PointToScreen(_pressPoint));
+                BeginDrag(DragMode.Move, _tree.PointToScreen(_pressPoint), _panel);
             }
             if (_drag == DragMode.Move)
             {
-                ApplyDragDelta(_tree.PointToScreen(e.Location));
+                ApplyDragDelta(_tree.PointToScreen(e.Location), _panel);
             }
         }
 
@@ -273,6 +272,11 @@ namespace DDriveIndexWallpaper
                     expandedTop.Add(ni.Path);
             }
 
+            // Edit-time re-sorts happen on every save anywhere, so keep the
+            // user's viewport: remember the row at the top edge and restore
+            // it after the rebuilt tree reorders the rows.
+            string topVisiblePath = GetFirstVisiblePath();
+
             _tree.BeginUpdate();
             _tree.Nodes.Clear();
             foreach (NodeItem item in
@@ -290,6 +294,52 @@ namespace DDriveIndexWallpaper
                 }
             }
             _tree.EndUpdate();
+
+            if (topVisiblePath != null)
+            {
+                TreeNode topNode = FindInNodes(_tree.Nodes, topVisiblePath);
+                if (topNode != null)
+                {
+                    try { topNode.EnsureVisible(); }
+                    catch { }
+                }
+            }
+        }
+
+        // Path of the node currently at the tree's top edge, used to hold
+        // the scroll position across rebuilds (the tree has no scroll bars
+        // but still owns a native scroll range).
+        private string GetFirstVisiblePath()
+        {
+            if (!_tree.IsHandleCreated || _tree.Nodes.Count == 0) return null;
+            IntPtr hItem;
+            try
+            {
+                hItem = Win32.SendMessage(_tree.Handle, Win32.TvmGetNextItem,
+                    (IntPtr)Win32.TvgnFirstVisible, IntPtr.Zero);
+            }
+            catch { return null; }
+            if (hItem == IntPtr.Zero) return null;
+            TreeNode found = FindNodeByHandle(_tree.Nodes, hItem);
+            NodeItem ni = found == null ? null : found.Tag as NodeItem;
+            return ni == null ? null : FolderScanner.Normalize(ni.Path);
+        }
+
+        private static TreeNode FindNodeByHandle(TreeNodeCollection nodes, IntPtr handle)
+        {
+            foreach (TreeNode c in nodes)
+            {
+                IntPtr h;
+                try { h = c.Handle; }
+                catch { h = IntPtr.Zero; }
+                if (h == handle) return c;
+                if (c.Nodes.Count > 0 && c.IsExpanded && !IsUnloaded(c))
+                {
+                    TreeNode deep = FindNodeByHandle(c.Nodes, handle);
+                    if (deep != null) return deep;
+                }
+            }
+            return null;
         }
 
         private void EnsureTreeBuilt()

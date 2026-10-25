@@ -33,6 +33,22 @@ namespace DDriveIndexWallpaper
                 if (!created) return;
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
+
+                // Never vanish silently: log every UI-thread / unhandled
+                // failure. UI-thread exceptions are recoverable, so keep
+                // running after logging instead of letting the process die.
+                Application.ThreadException += delegate(object s,
+                    System.Threading.ThreadExceptionEventArgs ea)
+                {
+                    AppLog.Write("UI thread exception: " + ea.Exception);
+                };
+                AppDomain.CurrentDomain.UnhandledException += delegate(object s,
+                    UnhandledExceptionEventArgs ea)
+                {
+                    AppLog.Write("FATAL unhandled exception: " +
+                        (ea.ExceptionObject == null ? "(null)" : ea.ExceptionObject.ToString()));
+                };
+
                 Application.Run(new MainForm());
                 GC.KeepAlive(mutex);
             }
